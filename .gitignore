@@ -1,0 +1,34 @@
+# .gitattributes
+*.h   text working-tree-encoding=UTF-8-BOM
+*.cpp text working-tree-encoding=UTF-8-BOM
+CMakeLists.txt text working-tree-encoding=UTF-8
+*.cmake        text working-tree-encoding=UTF-8
+
+# build
+build/
+cmake-build-*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# IDE
+.vscode/
+.vs/
+.idea/
+
+# binaries
+*.exe
+*.dll
+*.o
+*.obj
+out/
+
+# private
+code-review/*
+CLAUDE.md
+
+# frontend
+web/node_modules/
+web/dist/

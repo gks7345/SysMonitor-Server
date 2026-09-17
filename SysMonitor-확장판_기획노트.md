@@ -358,3 +358,153 @@ gRPC 인증 고도화
 로컬 버퍼 보관 기간
   24시간이 적절한가, 조정 가능하게 할 것인가
 ```
+
+---
+
+## 13. 개발 로드맵
+
+> 기능 단위로 개발하고 각 Phase마다 체크포인트로 검증한다.
+> 전체 흐름은 **데이터가 흐르는 경로 순서** — 수집 → 전송 → 수신 → 저장 → 표시.
+
+### Phase 개요
+
+| Phase | 핵심 | 완료 기준 |
+|-------|------|----------|
+| 1 | gRPC 뼈대 | Agent ↔ Server 더미 데이터 송수신 |
+| 2 | 인증 + 설정 파일 | 잘못된 api_key 연결 거부 확인 |
+| 3 | 실제 수집 데이터 전송 | sys / proc / target 실수치 서버 수신 |
+| 4 | 연결 끊김 처리 | 서버 30초 중단 후 재연결 시 갭 채워짐 |
+| 5 | Server 저장 + AgentManager | DuckDB 파일 적재 + 상태 관리 |
+| 6 | REST API + SSE | curl로 엔드포인트 응답 확인 |
+| 7 | 역방향 명령 (타겟 등록/제거) | UI 요청 → Agent 수집 시작 확인 |
+| 8 | Web UI | 브라우저에서 다중 Agent 전환 확인 |
+| 9 | 로컬 폴백 모드 | 플래그 전환만으로 두 모드 정상 동작 |
+
+---
+
+### Phase 1 — gRPC 뼈대
+
+Agent와 Server가 실제로 연결되고 데이터를 주고받는 최소 골격.
+이게 없으면 이후 모든 테스트가 불가능하다.
+
+```
+1-1. proto 파일 작성 (AgentData, 채널 2개 정의)
+1-2. Server: gRPC 수신 서버 기동 (받은 데이터 로그 출력만)
+1-3. Agent:  gRPC 클라이언트 연결 + 더미 데이터 전송
+1-4. 실시간 채널 / 배치 채널 분리 확인
+```
+✅ Server 로그에 PC-01의 SYS_REALTIME 수신 확인
+
+---
+
+### Phase 2 — 인증 + 설정 파일
+
+Phase 1 연결에 신원 확인을 붙이고 하드코딩을 제거한다.
+
+```
+2-1. agent.json 로드 (server_url / agent_id / api_key)
+2-2. Agent: gRPC metadata에 api_key 포함
+2-3. Server: (agent_id, api_key) 대조 + 거부 처리
+```
+✅ 잘못된 api_key로 연결 시 서버가 거부하는지 확인
+
+---
+
+### Phase 3 — 실제 수집 데이터 전송
+
+기존 SysMonitor 수집 엔진을 붙여 더미 데이터를 실제 데이터로 교체한다.
+sys / proc / target 모두 주기가 같아(실시간 1초, 배치 60초) 한 Phase에 묶는다.
+
+```
+3-1. 기존 SystemCollector / ProcessCollector / TargetCollector 재사용
+3-2. 수집 데이터 → Protobuf 직렬화 → payload
+3-3. 실시간 채널: 1초마다 SYS_REALTIME / PROC_REALTIME / TARGET_REALTIME 전송
+3-4. 배치 채널:   60초마다 SYS_BATCH / PROC_BATCH / TARGET_BATCH 전송
+```
+✅ Server에서 실제 CPU / 메모리 / 타겟 수치 수신 확인
+
+---
+
+### Phase 4 — 연결 끊김 처리
+
+안정성의 핵심. 여기까지 되면 실사용 가능한 수준이 된다.
+
+```
+4-1. keepalive ping 설정 + 끊김 감지
+4-2. 지수 백오프 + ±20~30% 랜덤 지터 재연결
+4-3. 끊김 동안 로컬 DuckDB 버퍼에 저장
+      (메인 루프 스레드만 접근, 네트워크 스레드는 커맨드 큐 경유)
+4-4. 재연결 시 서버에 last timestamp 요청 → 갭 전송 → 버퍼 삭제
+```
+✅ 서버를 30초간 껐다 켰을 때 갭이 채워지는지 확인
+
+---
+
+### Phase 5 — Server 저장 + AgentManager
+
+서버가 받은 데이터를 실제로 저장하고 Agent 상태를 관리한다.
+
+```
+5-1. AgentManager: Agent별 상태 관리 (online / warning / offline)
+       30초 미수신 → Warning / 90초 미수신 → Offline
+5-2. DataStore: Agent별 DuckDB 파일 저장
+       data/agent_PC-01_2026-09-17.db
+5-3. 날짜별 로테이션 + RETENTION_DAYS 초과 파일 자동 삭제
+5-4. 실시간 데이터: 메모리 RingBuffer 보관
+```
+✅ agent_PC-01_{날짜}.db 파일에 데이터 적재 확인
+
+---
+
+### Phase 6 — REST API + SSE
+
+Web UI가 소비할 API. 기존 SysMonitor ApiServer 구조를 참고한다.
+
+```
+6-1. REST API: 과거 기록 조회 (기존 엔드포인트 구조 재사용, agent_id 파라미터 추가)
+6-2. SSE: 실시간 데이터 브라우저 push
+6-3. Agent 목록 / 상태 조회 엔드포인트
+```
+✅ curl로 /api/agents, /api/current/system?agent=PC-01 응답 확인
+
+---
+
+### Phase 7 — 역방향 명령 (타겟 등록/제거)
+
+서버 API가 준비된 이후에 붙인다.
+UI 요청 → 서버 → gRPC 역방향 → Agent 흐름을 완성한다.
+
+```
+7-1. gRPC Bidirectional Streaming으로 Server → Agent 명령 전달
+7-2. Agent: pendingByName 큐 → applyPending() (기존 구조 재사용)
+7-3. 완료 ACK → Server → UI
+```
+✅ UI에서 타겟 등록 후 Agent에서 수집 시작되는지 확인
+
+---
+
+### Phase 8 — Web UI
+
+API와 역방향 명령이 모두 준비된 뒤 한 번에 완성도 있게 만든다.
+
+```
+8-1. Agent 목록 + 온/오프라인 상태 대시보드
+8-2. Agent 선택 → 실시간 그래프 (SSE 연결)
+8-3. 과거 기록 조회 (날짜 / 시간 선택)
+8-4. 타겟 등록/제거 UI (Phase 7 역방향 명령 연동)
+```
+✅ 브라우저에서 PC-01 / PC-02 전환하며 실시간 그래프 확인
+
+---
+
+### Phase 9 — 로컬 폴백 모드
+
+`send_to_server: false`일 때 기존 SysMonitor로 동작하는 분기.
+Agent Web UI 코드가 이미 존재하므로 플래그 추가만으로 구현 가능하다.
+
+```
+9-1. agent.json의 send_to_server 플래그로 분기
+       true  → gRPC 클라이언트 시작, ApiServer 비활성화
+       false → ApiServer 활성화 (기존 그대로), gRPC 비활성화
+```
+✅ 플래그 전환만으로 두 모드 정상 동작 확인
