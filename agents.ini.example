@@ -1,0 +1,12 @@
+; SysMonitorServer.exe/실행 파일과 같은 경로에 agents.ini로 복사해서 사용한다.
+
+; gRPC 서버가 리슨할 주소. 파일이 없거나 키가 없으면 0.0.0.0:50051로 폴백한다.
+[server]
+listen_addr = 0.0.0.0:50051
+
+; agent_id = api_key 형태로 등록된 Agent만 연결을 허용한다.
+; 파일이 없으면 등록된 Agent가 0개인 상태로 시작하여 모든 연결이 거부된다.
+; api_key가 비어 있는 항목은 등록되지 않는다 — Agent마다 키로 쓸 문자열을 정해서 채울 것.
+; 각 Agent의 agent.ini [agent] api_key에도 같은 값을 넣어야 한다.
+[agents]
+PC-01 =
