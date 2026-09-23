@@ -1,0 +1,173 @@
+// NOTE: SysMonitor-Agent와 SysMonitor-Server는 별도 레포이므로 이 파일은
+// SysMonitor-Server/proto/sysmonitor.proto와 수동으로 동기화해야 합니다.
+// 메시지 구조를 바꿀 때는 반드시 ProtocolVersion.PROTOCOL_VERSION_CURRENT 값을 올릴 것 —
+// 한쪽 레포만 바뀐 상태로 연결하면 Hello에서 FAILED_PRECONDITION으로 거부된다.
+syntax = "proto3";
+
+package sysmonitor;
+
+// Hello로 교환하는 프로토콜 버전. 버전 값의 유일한 정의 지점이 이 파일이므로,
+// 두 레포의 proto가 동기화되어 있으면 버전도 같고, 어긋나 있으면 버전도 다르다.
+enum ProtocolVersion {
+  PROTOCOL_VERSION_UNSPECIFIED = 0;   // Hello에 버전을 싣지 않던 이전 Agent
+  // 1 (2026-09-23): AgentData를 oneof 스냅샷 구조로 변경
+  PROTOCOL_VERSION_CURRENT = 2;       // 2026-09-23: 모든 RPC에 metadata "instance_id" 필수 (같은 agent_id를 쓰는 다른 PC 구분)
+}
+
+// ---------------------------------------------------------------------------
+// 스냅샷 (Agent의 models/SnapShotData.h와 1:1 대응)
+// 모든 string 필드는 UTF-8이어야 한다 — 수집기는 W API + CP_UTF8 변환으로 채울 것 (기획노트 Phase 3-0).
+// ---------------------------------------------------------------------------
+
+// SnapshotSysData (cpu / mem / disk / net)
+message SysSnapshot {
+  int64 timestamp_us = 1;          // epoch 마이크로초 (Agent DataStore::toTimestamp()와 같은 단위)
+
+  double cpu_total = 2;
+  double cpu_freq_ghz = 3;
+  double cpu_user = 4;
+  double cpu_kernel = 5;
+  double cpu_queue_length = 6;
+
+  double mem_total_mb = 7;
+  double mem_usage_percent = 8;
+  double mem_used_mb = 9;
+  double mem_avail_mb = 10;
+  double commit_mem_percent = 11;
+  double committed_mem_gb = 12;
+  double commit_limit_gb = 13;
+
+  double disk_read_kbs = 14;
+  double disk_write_kbs = 15;
+
+  double net_sent_kbps = 16;
+  double net_recv_kbps = 17;
+}
+
+// SnapshotProc
+message ProcInfo {
+  uint32 pid = 1;
+  string name = 2;
+  double cpu_usage = 3;
+  double memory_mb = 4;
+  double private_memory_mb = 5;
+  double disk_read_mbs = 6;
+  double disk_write_mbs = 7;
+  double net_sent_mbps = 8;
+  double net_recv_mbps = 9;
+}
+
+// SnapshotProcData — 전체 프로세스 목록. TopN 개수/정렬 기준은 UI가 정하므로 Agent는 자르지 않는다 (기획노트 §2).
+message ProcSnapshot {
+  int64 timestamp_us = 1;
+  repeated ProcInfo procs = 2;
+}
+
+// TargetNetConnection
+message NetConnection {
+  string protocol = 1;      // TCP / UDP
+  string local_addr = 2;    // IP:Port
+  string remote_addr = 3;   // IP:Port
+  string state = 4;         // ESTABLISHED, LISTEN 등
+}
+
+// 타겟의 메인 프로세스와 자식 프로세스(SnapshotChildProcess)가 공유하는 지표
+message TargetProcess {
+  uint32 pid = 1;
+  string name = 2;
+  double cpu_usage = 3;
+  double memory_mb = 4;
+  double private_memory_mb = 5;
+  double virtual_memory_mb = 6;
+  double disk_read_mbs = 7;
+  double disk_write_mbs = 8;
+  double net_sent_mbps = 9;
+  double net_recv_mbps = 10;
+  uint32 thread_count = 11;
+  uint32 handle_count = 12;
+  uint32 gdi_object_count = 13;
+  double page_fault_rate = 14;
+  repeated NetConnection connections = 15;
+}
+
+// SnapshotTarget의 last* 필드 — status가 RUNNING이 아닐 때만 채워진다
+message LastSessionSummary {
+  string date = 1;
+  double avg_cpu_usage = 2;
+  double peak_cpu_usage = 3;
+  double avg_memory_mb = 4;
+  double peak_memory_mb = 5;
+  double avg_net_mbps = 6;
+  double peak_net_mbps = 7;
+  uint32 peak_thread_count = 8;
+  uint32 peak_handle_count = 9;
+  double total_runtime_sec = 10;
+}
+
+message TargetInfo {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    RUNNING = 1;
+    NOT_RUNNING = 2;
+    NEVER_SEEN = 3;
+  }
+
+  string name = 1;
+  string exe_path = 2;
+  Status status = 3;
+  LastSessionSummary last_session = 4;    // status != RUNNING일 때만
+  TargetProcess main = 5;                 // status == RUNNING일 때만
+  double elapsed_sec = 6;
+  repeated TargetProcess children = 7;
+  // total* 합계(SnapshotTarget::calcTotals())는 main + children으로 서버가 계산할 수 있으므로 보내지 않는다.
+}
+
+// SnapshotTargetData
+message TargetSnapshot {
+  int64 timestamp_us = 1;
+  repeated TargetInfo targets = 2;
+}
+
+// ---------------------------------------------------------------------------
+// 전송 단위
+// ---------------------------------------------------------------------------
+
+// 메시지 1개 = 스냅샷 1건. sys/proc/target 구분은 oneof, 실시간/갭 구분은 어느 RPC로 왔는지로 한다.
+message AgentData {
+  string agent_id = 1;      // 서버가 인증된 metadata의 agent_id와 대조한다
+
+  // Phase 1/2의 timestamp(초) / type(DataType) / payload(string) — 번호·이름 재사용 금지
+  reserved 2, 3, 4;
+  reserved "timestamp", "type", "payload";
+
+  oneof body {
+    SysSnapshot sys = 10;
+    ProcSnapshot proc = 11;
+    TargetSnapshot target = 12;
+  }
+}
+
+// 스트림을 열기 전 인증 + 프로토콜 버전 확인용. 인증 정보는 본문이 아니라 call metadata로 전달한다.
+// 모든 RPC(Hello / StreamRealtime / StreamBatch)의 필수 metadata:
+//   agent_id    — agents.ini에 등록된 ID
+//   api_key     — 그 ID의 키
+//   instance_id — 설치(PC) 단위 고유값 (Agent: Windows MachineGuid). 같은 agent_id로 다른 PC가
+//                 동시에 접속하면 서버가 ALREADY_EXISTS로 거부한다. 같은 instance의 재접속은 허용.
+message HelloRequest {
+  uint32 protocol_version = 1;   // ProtocolVersion 값
+}
+
+message Ack {
+  bool success = 1;
+  string message = 2;
+}
+
+service AgentService {
+  // 연결 직후 1회: metadata 인증 + 프로토콜 버전 확인 후 즉시 응답 (성공 시 Ack.message = "Hello <agent_id>").
+  // 스트림 인증을 대체하지 않는다 — 서버는 StreamRealtime/StreamBatch에서도 매번 인증한다.
+  rpc Hello(HelloRequest) returns (Ack);
+  // 1초마다 sys / proc(전체 목록) / target 스냅샷 (스냅샷 1건 = 메시지 1개)
+  rpc StreamRealtime(stream AgentData) returns (Ack);
+  // 재연결 후 갭 데이터 전송 전용 (Phase 4-4, 스냅샷 1건 = 메시지 1개). 주기적 배치 전송은 없다 (기획노트 §2).
+  rpc StreamBatch(stream AgentData) returns (Ack);
+}

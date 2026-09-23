@@ -1,0 +1,8 @@
+# 소스는 UTF-8(BOM 유무 혼재)로 바이트 그대로 저장한다. MSVC는 /utf-8 로 빌드하므로 BOM 불필요.
+# working-tree-encoding=UTF-8-BOM 은 Git for Windows iconv 가 지원하지 않아 git add 가 실패하므로 쓰지 않는다.
+* text=auto
+*.h     text
+*.cpp   text
+*.proto text
+CMakeLists.txt text
+*.cmake text
