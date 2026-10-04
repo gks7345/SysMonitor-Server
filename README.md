@@ -12,13 +12,13 @@
 |------|------|------|
 | Phase 1 | gRPC 뼈대 (Agent 연결 수신) | ✅ 완료 |
 | Phase 2 | 인증 + 설정 파일 (`agents.ini`, 장비 식별, 세션 관리) | ✅ 완료 |
-| Phase 3 | 실제 수집 데이터 수신 | 🔧 proto 구조만 선반영 |
+| Phase 3 | 실제 수집 데이터 수신 | ✅ 완료 |
 | Phase 5 | 저장 (DuckDB) + AgentManager | 예정 |
 | Phase 6 | REST API + SSE | 예정 |
 | Phase 7 | 역방향 명령 (타겟 등록/제거) | 예정 |
 | Phase 8 | Web UI | 예정 |
 
-지금 서버는 Agent를 인증하고, 받은 스냅샷을 **로그로만** 출력합니다. 저장소, REST/SSE, Web UI, Docker 배포는 아직 없습니다. 아래 설명 중 "(Phase N 예정)"으로 표시된 부분은 목표 설계입니다. 전체 설계 근거와 로드맵은 `SysMonitor-확장판_기획노트.md`에 있습니다.
+지금 서버는 Agent를 인증하고, 받은 실제 스냅샷을 **로그로만** 요약 출력합니다 (sys: CPU·메모리, proc: 개수 + CPU 최상위 1개, target: 타겟별 상태·CPU·메모리). 저장소, REST/SSE, Web UI, Docker 배포는 아직 없습니다. 아래 설명 중 "(Phase N 예정)"으로 표시된 부분은 목표 설계입니다. 전체 설계 근거와 로드맵은 `SysMonitor-확장판_기획노트.md`에 있습니다.
 
 ## 아키텍처
 
