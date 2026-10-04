@@ -70,9 +70,10 @@ void GrpcServer::logReceived(const char* channel, const sysmonitor::AgentData& d
             summary += t.name() + "(" + sysmonitor::TargetInfo::Status_Name(t.status());
             if (t.status() == sysmonitor::TargetInfo::RUNNING) {
                 const auto& m = t.main();
-                summary += fmt::format(" pid={} cpu={:.1f}% mem={} handles={} gdi={}{} children={}", m.pid(), m.cpu_usage(),
+                summary += fmt::format(" pid={} cpu={} mem={} handles={} gdi={}{} children={}", m.pid(),
+                    m.has_cpu_usage() ? fmt::format("{:.1f}%", m.cpu_usage()) : std::string("N/A"),
                     m.has_memory_mb() ? fmt::format("{:.1f}MB", m.memory_mb()) : std::string("N/A"),
-                    m.handle_count(),
+                    m.has_handle_count() ? std::to_string(m.handle_count()) : std::string("N/A"),
                     m.has_gdi_object_count() ? std::to_string(m.gdi_object_count()) : std::string("N/A"),
                     t.has_exe_path() ? "" : " path=N/A",
                     t.children_size());
