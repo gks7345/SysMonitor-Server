@@ -11,7 +11,8 @@ package sysmonitor;
 enum ProtocolVersion {
   PROTOCOL_VERSION_UNSPECIFIED = 0;   // Hello에 버전을 싣지 않던 이전 Agent
   // 1 (2026-09-23): AgentData를 oneof 스냅샷 구조로 변경
-  PROTOCOL_VERSION_CURRENT = 2;       // 2026-09-23: 모든 RPC에 metadata "instance_id" 필수 (같은 agent_id를 쓰는 다른 PC 구분)
+  // 2 (2026-09-23): 모든 RPC에 metadata "instance_id" 필수 (같은 agent_id를 쓰는 다른 PC 구분)
+  PROTOCOL_VERSION_CURRENT = 3;       // 2026-10-04: 수집하지 못한 값을 0과 구분 — TargetProcess.memory_mb / gdi_object_count, TargetInfo.exe_path를 optional로
 }
 
 // ---------------------------------------------------------------------------
@@ -72,11 +73,14 @@ message NetConnection {
 }
 
 // 타겟의 메인 프로세스와 자식 프로세스(SnapshotChildProcess)가 공유하는 지표
+// optional 필드: 값이 없으면(has_xxx() == false) "수집하지 못함"이다 — Agent에 그 프로세스를 열 권한이 없을 때
+// (관리자 권한 없이 실행한 Agent가 서비스 계정의 프로세스를 볼 때 등). 0은 실제로 0일 때만 보낸다.
+// 받는 쪽은 없는 값을 0으로 읽지 말고 "N/A"로 다룰 것 (2026-10-01 Phase 3 리뷰 High #5).
 message TargetProcess {
   uint32 pid = 1;
   string name = 2;
   double cpu_usage = 3;
-  double memory_mb = 4;
+  optional double memory_mb = 4;    // Working Set - Private
   double private_memory_mb = 5;
   double virtual_memory_mb = 6;
   double disk_read_mbs = 7;
@@ -84,8 +88,8 @@ message TargetProcess {
   double net_sent_mbps = 9;
   double net_recv_mbps = 10;
   uint32 thread_count = 11;
-  uint32 handle_count = 12;
-  uint32 gdi_object_count = 13;
+  uint32 handle_count = 12;         // PDH "Handle Count" — 프로세스를 열 권한이 없어도 읽힌다
+  optional uint32 gdi_object_count = 13;
   double page_fault_rate = 14;
   repeated NetConnection connections = 15;
 }
@@ -113,7 +117,7 @@ message TargetInfo {
   }
 
   string name = 1;
-  string exe_path = 2;
+  optional string exe_path = 2;           // 없음 = 수집하지 못함 (TargetProcess의 optional과 같은 규칙) 또는 NEVER_SEEN
   Status status = 3;
   LastSessionSummary last_session = 4;    // status != RUNNING일 때만
   TargetProcess main = 5;                 // status == RUNNING일 때만
