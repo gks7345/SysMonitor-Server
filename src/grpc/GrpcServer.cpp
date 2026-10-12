@@ -1,5 +1,7 @@
 #include "grpc/GrpcServer.h"
 
+#include <algorithm>
+
 #include <grpcpp/grpcpp.h>
 #include <spdlog/spdlog.h>
 
@@ -47,12 +49,39 @@ void GrpcServer::logReceived(const char* channel, const sysmonitor::AgentData& d
     case sysmonitor::AgentData::kSys:
         spdlog::info("[{}] agent={} sys ts_us={} cpu={:.1f}% mem={:.1f}%", channel, data.agent_id(), data.sys().timestamp_us(), data.sys().cpu_total(), data.sys().mem_usage_percent());
         break;
-    case sysmonitor::AgentData::kProc:
-        spdlog::info("[{}] agent={} proc ts_us={} procs={}", channel, data.agent_id(), data.proc().timestamp_us(), data.proc().procs_size());
+    case sysmonitor::AgentData::kProc: {
+        // 전체 목록이 오므로 개수 + CPU 최상위 1개만 요약한다 (TopN 선택은 UI 몫)
+        const auto& procs = data.proc().procs();
+        auto top = std::max_element(procs.begin(), procs.end(),
+            [](const sysmonitor::ProcInfo& a, const sysmonitor::ProcInfo& b) { return a.cpu_usage() < b.cpu_usage(); });
+        if (top != procs.end()) {
+            spdlog::info("[{}] agent={} proc ts_us={} procs={} top_cpu={}({:.1f}%, {:.1f}MB)", channel, data.agent_id(), data.proc().timestamp_us(), procs.size(), top->name(), top->cpu_usage(), top->memory_mb());
+        } else {
+            spdlog::info("[{}] agent={} proc ts_us={} procs=0", channel, data.agent_id(), data.proc().timestamp_us());
+        }
         break;
-    case sysmonitor::AgentData::kTarget:
-        spdlog::info("[{}] agent={} target ts_us={} targets={}", channel, data.agent_id(), data.target().timestamp_us(), data.target().targets_size());
+    }
+    case sysmonitor::AgentData::kTarget: {
+        // 타겟마다 이름 / 상태 / (실행 중이면) 메인 프로세스 CPU·메모리·핸들·GDI·자식 수
+        // optional 필드는 has_xxx()가 false면 Agent가 수집하지 못한 것이다 (권한 부족 등) — 0으로 읽지 말고 N/A로 다룬다.
+        std::string summary;
+        for (const auto& t : data.target().targets()) {
+            if (!summary.empty()) summary += ", ";
+            summary += t.name() + "(" + sysmonitor::TargetInfo::Status_Name(t.status());
+            if (t.status() == sysmonitor::TargetInfo::RUNNING) {
+                const auto& m = t.main();
+                summary += fmt::format(" pid={} cpu={:.1f}% mem={} handles={} gdi={}{} children={}", m.pid(), m.cpu_usage(),
+                    m.has_memory_mb() ? fmt::format("{:.1f}MB", m.memory_mb()) : std::string("N/A"),
+                    m.handle_count(),
+                    m.has_gdi_object_count() ? std::to_string(m.gdi_object_count()) : std::string("N/A"),
+                    t.has_exe_path() ? "" : " path=N/A",
+                    t.children_size());
+            }
+            summary += ")";
+        }
+        spdlog::info("[{}] agent={} target ts_us={} targets={} [{}]", channel, data.agent_id(), data.target().timestamp_us(), data.target().targets_size(), summary);
         break;
+    }
     case sysmonitor::AgentData::BODY_NOT_SET:
         break;   // validateMessage()가 이미 INVALID_ARGUMENT로 거부하므로 도달하지 않음
     }
