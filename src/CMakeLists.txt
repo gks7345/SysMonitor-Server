@@ -42,7 +42,8 @@ if(MSVC)
     target_compile_options(SysMonitorServerProto PRIVATE /utf-8)
     target_compile_options(SysMonitorServer PRIVATE /utf-8)
     target_compile_options(inih PRIVATE /utf-8)
-    # C4062(enum switch에서 처리 안 된 열거자, default 없을 때)는 /W4에서도 꺼져 있어 직접 켠다 —
-    # proto oneof에 스냅샷 종류가 추가되면 logReceived의 default 없는 switch가 고칠 곳을 알려 주도록.
-    target_compile_options(SysMonitorServer PRIVATE /w14062)
+    # C4062(enum switch에서 처리 안 된 열거자, default 없을 때)는 /W4에서도 꺼져 있어 직접 켜고, 오류로 다룬다 —
+    # proto oneof에 스냅샷 종류가 추가되면 logReceived의 default 없는 switch를 고치기 전에는 빌드되지 않도록.
+    # 경고로만 두면 빌드가 성공해서, 출력을 보지 않으면 빠뜨린 switch를 놓친다.
+    target_compile_options(SysMonitorServer PRIVATE /we4062)
 endif()

@@ -13,7 +13,8 @@ enum ProtocolVersion {
   // 1 (2026-09-23): AgentData를 oneof 스냅샷 구조로 변경
   // 2 (2026-09-23): 모든 RPC에 metadata "instance_id" 필수 (같은 agent_id를 쓰는 다른 PC 구분)
   // 3 (2026-10-04): 수집하지 못한 값을 0과 구분 — TargetProcess.memory_mb / gdi_object_count, TargetInfo.exe_path를 optional로
-  PROTOCOL_VERSION_CURRENT = 4;       // 2026-10-05: PDH에서 오는 TargetProcess 지표 전부와 TargetInfo.elapsed_sec를 optional로 (새 프로세스의 첫 틱 등)
+  // 4 (2026-10-05): PDH에서 오는 TargetProcess 지표 전부와 TargetInfo.elapsed_sec를 optional로 (새 프로세스의 첫 틱 등)
+  PROTOCOL_VERSION_CURRENT = 5;       // 2026-10-11: SysSnapshot의 지표 전부와 ProcInfo의 PDH 지표를 optional로 (읽지 못한 값을 0과 구분)
 }
 
 // ---------------------------------------------------------------------------
@@ -22,39 +23,45 @@ enum ProtocolVersion {
 // ---------------------------------------------------------------------------
 
 // SnapshotSysData (cpu / mem / disk / net)
+// optional 필드: 값이 없으면(has_xxx() == false) Agent가 그 값을 읽지 못한 것이다 — 그 카운터가 없는 Windows이거나
+// 그 틱의 수집이 실패했을 때. 0은 실제로 0일 때만 보낸다. 받는 쪽은 없는 값을 0으로 읽지 말고 "N/A"로 다룰 것.
 message SysSnapshot {
   int64 timestamp_us = 1;          // epoch 마이크로초 (Agent DataStore::toTimestamp()와 같은 단위)
 
-  double cpu_total = 2;
-  double cpu_freq_ghz = 3;
-  double cpu_user = 4;
-  double cpu_kernel = 5;
-  double cpu_queue_length = 6;
+  optional double cpu_total = 2;
+  optional double cpu_freq_ghz = 3;
+  optional double cpu_user = 4;
+  optional double cpu_kernel = 5;
+  optional double cpu_queue_length = 6;
 
-  double mem_total_mb = 7;
-  double mem_usage_percent = 8;
-  double mem_used_mb = 9;
-  double mem_avail_mb = 10;
-  double commit_mem_percent = 11;
-  double committed_mem_gb = 12;
-  double commit_limit_gb = 13;
+  optional double mem_total_mb = 7;
+  optional double mem_usage_percent = 8;   // mem_total_mb와 mem_avail_mb로 계산 — 둘 중 하나가 없으면 없다
+  optional double mem_used_mb = 9;         // 위와 같음
+  optional double mem_avail_mb = 10;
+  optional double commit_mem_percent = 11;
+  optional double committed_mem_gb = 12;
+  optional double commit_limit_gb = 13;
 
-  double disk_read_kbs = 14;
-  double disk_write_kbs = 15;
+  optional double disk_read_kbs = 14;
+  optional double disk_write_kbs = 15;
 
-  double net_sent_kbps = 16;
-  double net_recv_kbps = 17;
+  optional double net_sent_kbps = 16;
+  optional double net_recv_kbps = 17;
 }
 
 // SnapshotProc
+// optional 필드(PDH에서 오는 지표): 값이 없으면 Agent가 그 값을 읽지 못한 것이다 — 그 카운터의 배열을 읽지 못한 틱,
+// 프로세스가 처음 보인 틱의 비율 값(cpu_usage, disk_*_mbs). 0은 실제로 0일 때만 보낸다.
+// 값이 하나도 없어도 pid와 name은 온다(프로세스 목록에서 오는 값) — 목록 자체가 비는 것은 아니다.
+// 같은 이름의 자식을 부모에 합친 값은 있는 값만 더한 것이다.
 message ProcInfo {
   uint32 pid = 1;
   string name = 2;
-  double cpu_usage = 3;
-  double memory_mb = 4;
-  double private_memory_mb = 5;
-  double disk_read_mbs = 6;
-  double disk_write_mbs = 7;
+  optional double cpu_usage = 3;
+  optional double memory_mb = 4;
+  optional double private_memory_mb = 5;
+  optional double disk_read_mbs = 6;
+  optional double disk_write_mbs = 7;
   double net_sent_mbps = 8;
   double net_recv_mbps = 9;
 }
