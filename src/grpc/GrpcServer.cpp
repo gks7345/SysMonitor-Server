@@ -46,18 +46,29 @@ GrpcServer::GrpcServer(AgentAuth auth) : auth_(std::move(auth)) {}
 void GrpcServer::logReceived(const char* channel, const sysmonitor::AgentData& data) {
     // Phase 5에서 DataStore 저장으로 교체 예정 — 지금은 스냅샷 종류별 요약만 남긴다.
     switch (data.body_case()) {
-    case sysmonitor::AgentData::kSys:
-        spdlog::info("[{}] agent={} sys ts_us={} cpu={:.1f}% mem={:.1f}%", channel, data.agent_id(), data.sys().timestamp_us(), data.sys().cpu_total(), data.sys().mem_usage_percent());
+    case sysmonitor::AgentData::kSys: {
+        // optional 필드는 has_xxx()가 false면 Agent가 읽지 못한 것이다 — 0으로 읽지 말고 N/A로 다룬다.
+        const auto& sys = data.sys();
+        spdlog::info("[{}] agent={} sys ts_us={} cpu={} mem={}", channel, data.agent_id(), sys.timestamp_us(),
+            sys.has_cpu_total() ? fmt::format("{:.1f}%", sys.cpu_total()) : std::string("N/A"),
+            sys.has_mem_usage_percent() ? fmt::format("{:.1f}%", sys.mem_usage_percent()) : std::string("N/A"));
         break;
+    }
     case sysmonitor::AgentData::kProc: {
         // 전체 목록이 오므로 개수 + CPU 최상위 1개만 요약한다 (TopN 선택은 UI 몫)
+        // CPU 값이 없는 항목(Agent가 읽지 못함)은 0으로 치지 않고 비교에서 뺀다.
         const auto& procs = data.proc().procs();
-        auto top = std::max_element(procs.begin(), procs.end(),
-            [](const sysmonitor::ProcInfo& a, const sysmonitor::ProcInfo& b) { return a.cpu_usage() < b.cpu_usage(); });
-        if (top != procs.end()) {
-            spdlog::info("[{}] agent={} proc ts_us={} procs={} top_cpu={}({:.1f}%, {:.1f}MB)", channel, data.agent_id(), data.proc().timestamp_us(), procs.size(), top->name(), top->cpu_usage(), top->memory_mb());
+        const sysmonitor::ProcInfo* top = nullptr;
+        for (const auto& p : procs) {
+            if (!p.has_cpu_usage()) continue;
+            if (!top || p.cpu_usage() > top->cpu_usage()) top = &p;
+        }
+        if (top) {
+            spdlog::info("[{}] agent={} proc ts_us={} procs={} top_cpu={}({:.1f}%, {})", channel, data.agent_id(), data.proc().timestamp_us(), procs.size(), top->name(), top->cpu_usage(),
+                top->has_memory_mb() ? fmt::format("{:.1f}MB", top->memory_mb()) : std::string("N/A"));
         } else {
-            spdlog::info("[{}] agent={} proc ts_us={} procs=0", channel, data.agent_id(), data.proc().timestamp_us());
+            // 목록이 비었거나, 어느 항목에도 CPU 값이 없다
+            spdlog::info("[{}] agent={} proc ts_us={} procs={} top_cpu=N/A", channel, data.agent_id(), data.proc().timestamp_us(), procs.size());
         }
         break;
     }
