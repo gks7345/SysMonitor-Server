@@ -9,7 +9,7 @@ namespace {
 
 // ServerContext::client_metadata()에서 key에 해당하는 값을 꺼낸다. 없으면 빈 문자열.
 std::string metadataValue(const grpc::ServerContext* context, const char* key) {
-    auto& metadata = context->client_metadata();
+    auto& metadata = context->client_metadata();        // 클라이언트가 보낸 metadata 전체 (multimap)
     auto it = metadata.find(key);
     if (it == metadata.end()) {
         return "";
@@ -38,6 +38,56 @@ grpc::Status readInstanceId(const grpc::ServerContext* context, const std::strin
     }
     return grpc::Status::OK;
 }
+
+// 스냅샷의 timestamp. 스냅샷이 없는 메시지는 validateMessage()가 먼저 거부하므로 BODY_NOT_SET에는 오지 않는다.
+int64_t snapshotTimestampUs(const sysmonitor::AgentData& data) {
+    switch (data.body_case()) {
+    case sysmonitor::AgentData::kSys:
+        return data.sys().timestamp_us();
+    case sysmonitor::AgentData::kProc:
+        return data.proc().timestamp_us();
+    case sysmonitor::AgentData::kTarget:
+        return data.target().timestamp_us();
+	case sysmonitor::AgentData::BODY_NOT_SET:   // validateMessage()가 먼저 거부하므로 여기로 오지 않는다
+        break;
+    }
+    return 0;
+}
+
+// 갭 스트림 하나의 요약 — 메시지마다 로그를 남기면 하루치 갭(약 26만 건)이 로그를 덮으므로 스트림이 끝날 때 한 줄로 남긴다.
+struct BatchSummary {
+    int sys = 0;
+    int proc = 0;
+    int target = 0;
+    int64_t firstTs = 0;
+    int64_t lastTs = 0;
+    std::string collectedBy;   // 묶음 안의 수집 장비 (서로 다르면 "mixed")
+
+    void add(const sysmonitor::AgentData& data) {
+        switch (data.body_case()) {
+        case sysmonitor::AgentData::kSys: 
+            ++sys; 
+            break;
+        case sysmonitor::AgentData::kProc: 
+            ++proc; 
+            break;
+        case sysmonitor::AgentData::kTarget: 
+            ++target; 
+            break;
+        case sysmonitor::AgentData::BODY_NOT_SET: 
+            break;
+        }
+        const int64_t ts = snapshotTimestampUs(data);
+        if (sys + proc + target == 1) {
+            firstTs = lastTs = ts;
+            collectedBy = data.collected_instance_id();
+        } else {
+            firstTs = std::min(firstTs, ts);
+            lastTs = std::max(lastTs, ts);
+            if (collectedBy != data.collected_instance_id()) collectedBy = "mixed";
+        }
+    }
+};
 
 } // namespace
 
@@ -153,6 +203,13 @@ grpc::Status GrpcServer::checkSession(const std::string& agentId, const std::str
     return grpc::Status::OK;
 }
 
+void GrpcServer::recordRealtimeTimestamp(const std::string& agentId, int64_t timestampUs) {
+    std::lock_guard<std::mutex> lock(sessionsMtx_);
+    // 최대 시간이 아니라 마지막으로 읽은 값이다. Agent는 이 값과 같은 틱을 자기가 보낸 순서에서 찾아 그 앞만 지운다 —
+    // 최대 시간이면 Agent 시계가 뒤로 간 뒤의 틱이 모두 "이미 받은 것"보다 작아져, 받지 못한 틱까지 지워진다.
+    sessions_[agentId].lastRealtimeTimestampUs = timestampUs;
+}
+
 void GrpcServer::releaseSession(const std::string& agentId) {
     std::lock_guard<std::mutex> lock(sessionsMtx_);
     auto it = sessions_.find(agentId);
@@ -166,16 +223,44 @@ void GrpcServer::releaseSession(const std::string& agentId) {
 }
 
 grpc::Status GrpcServer::beginStream(grpc::ServerContext* context, std::string* verifiedAgentId) {
-    grpc::Status authStatus = authenticate(context, verifiedAgentId);
+	grpc::Status authStatus = authenticate(context, verifiedAgentId);       // agent_id/api_key 확인
     if (!authStatus.ok()) {
         return authStatus;
     }
     std::string instanceId;
-    grpc::Status idStatus = readInstanceId(context, *verifiedAgentId, &instanceId);
+	grpc::Status idStatus = readInstanceId(context, *verifiedAgentId, &instanceId);     // instance_id 확인
     if (!idStatus.ok()) {
         return idStatus;
     }
     return checkSession(*verifiedAgentId, instanceId, /*claim=*/true);
+}
+
+grpc::Status GrpcServer::checkUnary(grpc::ServerContext* context, std::string* verifiedAgentId) {
+	grpc::Status authStatus = authenticate(context, verifiedAgentId);       // agent_id/api_key 확인
+    if (!authStatus.ok()) {
+        return authStatus;
+    }
+    std::string instanceId;
+	grpc::Status idStatus = readInstanceId(context, *verifiedAgentId, &instanceId);     // instance_id 확인
+    if (!idStatus.ok()) {
+        return idStatus;
+    }
+    return checkSession(*verifiedAgentId, instanceId, /*claim=*/false);
+}
+
+grpc::Status GrpcServer::GetResumePoint(grpc::ServerContext* context, const sysmonitor::ResumePointRequest* /*request*/, sysmonitor::ResumePoint* response) {
+    std::string agentId;
+    grpc::Status status = checkUnary(context, &agentId);
+    if (!status.ok()) {
+        return status;
+    }
+    // Agent가 연결 중 주기적으로 부르므로 성공은 로그로 남기지 않는다.
+    std::lock_guard<std::mutex> lock(sessionsMtx_);
+    auto it = sessions_.find(agentId);
+    if (it != sessions_.end() && it->second.lastRealtimeTimestampUs) {
+        response->set_last_realtime_timestamp_us(*it->second.lastRealtimeTimestampUs);
+    }
+    return grpc::Status::OK;
 }
 
 grpc::Status GrpcServer::Hello(grpc::ServerContext* context, const sysmonitor::HelloRequest* request, sysmonitor::Ack* ack) {
@@ -225,6 +310,7 @@ grpc::Status GrpcServer::StreamRealtime(grpc::ServerContext* context, grpc::Serv
         if (!msgStatus.ok()) {
             return msgStatus;
         }
+        recordRealtimeTimestamp(agentId, snapshotTimestampUs(data));
         logReceived("realtime", data);
     }
     ack->set_success(true);
@@ -240,13 +326,29 @@ grpc::Status GrpcServer::StreamBatch(grpc::ServerContext* context, grpc::ServerR
     }
     ScopeExit release([&] { releaseSession(agentId); });
 
+    // 갭 데이터는 Agent의 로컬 버퍼에서 오므로, 지금 연결한 장비가 아니라 버퍼에 기록된 수집 장비가 출처다.
+    // 출처 판정(수집 시각에 그 장비가 이 agent_id에 연결돼 있었는가)은 연결 이력을 저장하는 Phase 5에서 한다 — 지금은 다른 장비의 데이터가 섞여 왔는지만 알린다.
+    const std::string connectedInstance = metadataValue(context, "instance_id");
+    BatchSummary summary;
     sysmonitor::AgentData data;
     while (reader->Read(&data)) {
         grpc::Status msgStatus = validateMessage("batch", data, agentId);
         if (!msgStatus.ok()) {
             return msgStatus;
         }
-        logReceived("batch", data);
+        if (data.collected_instance_id().empty()) {
+            spdlog::warn("[GrpcServer] batch message from agent={} has no collected_instance_id — closing stream", agentId);
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "gap message has no collected_instance_id");
+        }
+        summary.add(data);
+    }
+    if (summary.sys + summary.proc + summary.target > 0) {
+        spdlog::info("[batch] agent={} gap snapshots sys={} proc={} target={} ts_us={}..{} collected_by={}", agentId,
+            summary.sys, summary.proc, summary.target, summary.firstTs, summary.lastTs, summary.collectedBy);
+        if (summary.collectedBy != connectedInstance) {
+            spdlog::warn("[batch] agent={} gap data was collected by instance {} but arrived from instance {} — provenance is not checked until Phase 5",
+                agentId, summary.collectedBy, connectedInstance);
+        }
     }
     ack->set_success(true);
     ack->set_message("ok");
@@ -262,8 +364,8 @@ bool GrpcServer::run(const std::string& listenAddr, const std::string& agentsIni
 
     // 스트림이 Agent → 서버 단방향이라 서버는 스트림이 끝날 때까지 아무것도 보내지 않는다 — TCP 재전송으로
     // 끊김을 알 기회가 없어, 정전/랜선 뽑힘처럼 FIN/RST 없이 사라진 Agent는 keepalive ping으로만 감지된다.
-    // gRPC 서버 기본값은 2시간이라, 그동안 죽은 연결이 세션 표에 "활성"으로 남아 교체한 PC를 ALREADY_EXISTS로
-    // 막는다 (6차 코드 리뷰 Medium #1). 약 40초 안에 감지하면 Read()가 false를 반환하고 ScopeExit가 세션을 푼다.
+    // gRPC 서버 기본값은 2시간이라, 그동안 죽은 연결이 세션 표에 "활성"으로 남아 교체한 PC를 ALREADY_EXISTS로 막는다.
+    // 약 40초 안에 감지하면 Read()가 false를 반환하고 ScopeExit가 세션을 푼다.
     // - KEEPALIVE_TIMEOUT만으로는 부족하다: 이 gRPC 버전(1.66)은 keepalive를 켜면 ping 응답 대기(PING_TIMEOUT)의
     //   기본값이 1분이고, 실측(패킷을 막는 중계기)에서 감지가 30초 + 60초 = 약 90초 걸렸다. 그래서 둘 다 10초로 맞춘다.
     // - GRPC_ARG_HTTP2_MAX_PINGS_WITHOUT_DATA는 설정하지 않는다 — 이 버전은 서버 쪽 값을 0(무제한)으로 고정한다.
@@ -273,6 +375,13 @@ bool GrpcServer::run(const std::string& listenAddr, const std::string& agentsIni
     // GRPC_ARG_PING_TIMEOUT_MS). 내부 헤더를 include하지 않고 키 문자열을 직접 쓴다 — gRPC를 올리면 이 키가
     // 그대로인지, 패킷을 막는 중계기로 감지 시간이 여전히 약 40초인지 다시 확인할 것.
     builder.AddChannelArgument("grpc.http2.ping_timeout_ms", 10 * 1000);
+
+    // Agent도 30초마다 keepalive ping을 보낸다. 서버 기본 정책은 "직전 ping과 5분 미만 간격인 ping"을 strike로 세고
+    // strike가 2를 넘으면 too_many_pings로 연결을 끊는데, strike는 서버가 데이터/헤더를 보낼 때만 초기화된다 —
+    // 이 서버는 스트림 중에 거의 아무것도 보내지 않으므로 기본값이면 Agent가 약 90초마다 끊긴다.
+    // 허용 간격을 20초로 낮춰 30초 ping은 strike가 되지 않게 한다. Agent의 keepalive 간격(GrpcClient.cpp)은
+    // 이 값 이상이어야 한다 — 두 값은 계약이므로 한쪽을 바꾸면 다른 쪽도 확인할 것. MAX_PING_STRIKES는 기본값(2) 유지.
+    builder.AddChannelArgument(GRPC_ARG_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS, 20 * 1000);
 
     // 등록한 포트 중 하나라도 바인딩에 실패하면 BuildAndStart()는 nullptr를 반환한다.
     // 구체적인 원인(예: 주소 형식 오류, WSAEADDRINUSE)은 gRPC 코어가 stderr에 직접 출력한다.

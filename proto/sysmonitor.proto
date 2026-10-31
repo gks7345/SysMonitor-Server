@@ -14,7 +14,8 @@ enum ProtocolVersion {
   // 2 (2026-09-23): 모든 RPC에 metadata "instance_id" 필수 (같은 agent_id를 쓰는 다른 PC 구분)
   // 3 (2026-10-04): 수집하지 못한 값을 0과 구분 — TargetProcess.memory_mb / gdi_object_count, TargetInfo.exe_path를 optional로
   // 4 (2026-10-05): PDH에서 오는 TargetProcess 지표 전부와 TargetInfo.elapsed_sec를 optional로 (새 프로세스의 첫 틱 등)
-  PROTOCOL_VERSION_CURRENT = 5;       // 2026-10-11: SysSnapshot의 지표 전부와 ProcInfo의 PDH 지표를 optional로 (읽지 못한 값을 0과 구분)
+  // 5 (2026-10-11): SysSnapshot의 지표 전부와 ProcInfo의 PDH 지표를 optional로 (읽지 못한 값을 0과 구분)
+  PROTOCOL_VERSION_CURRENT = 6;       // 2026-10-15: GetResumePoint RPC, 갭 메시지의 AgentData.collected_instance_id (Phase 4 갭 전송)
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +163,20 @@ message AgentData {
     ProcSnapshot proc = 11;
     TargetSnapshot target = 12;
   }
+
+  // 이 스냅샷을 수집한 장비의 instance_id. 갭 메시지(StreamBatch)에는 필수 — Agent의 로컬 버퍼는 설치 폴더와 함께
+  // 다른 PC로 복사될 수 있어, 지금 연결한 장비가 수집한 데이터라는 보장이 없다. 서버는 이 값과 자기의 연결 이력으로
+  // 출처를 판정한다. 실시간 메시지에서는 비워 둔다 — 연결의 metadata instance_id가 곧 수집 장비다.
+  string collected_instance_id = 5;
+}
+
+message ResumePointRequest {}
+
+message ResumePoint {
+  // 서버가 이 agent_id의 실시간 채널에서 마지막으로 읽은 스냅샷의 timestamp_us. 없음 = 서버가 아는 기록이 없다
+  // (서버 재시작 등) — Agent는 버퍼를 전부 보낸다. 같은 틱의 일부 스냅샷만 받았을 수 있으므로 Agent는 이 값과
+  // 같은 timestamp의 스냅샷도 다시 보내고, 받는 쪽은 (스냅샷 종류, timestamp)가 같은 것을 중복으로 본다.
+  optional int64 last_realtime_timestamp_us = 1;
 }
 
 // 스트림을 열기 전 인증 + 프로토콜 버전 확인용. 인증 정보는 본문이 아니라 call metadata로 전달한다.
@@ -183,8 +198,12 @@ service AgentService {
   // 연결 직후 1회: metadata 인증 + 프로토콜 버전 확인 후 즉시 응답 (성공 시 Ack.message = "Hello <agent_id>").
   // 스트림 인증을 대체하지 않는다 — 서버는 StreamRealtime/StreamBatch에서도 매번 인증한다.
   rpc Hello(HelloRequest) returns (Ack);
+  // 실시간 채널에서 서버가 마지막으로 읽은 timestamp. Agent는 연결할 때(갭 전송 범위 결정)와 연결 중 주기적으로
+  // (메모리에 보관한 "아직 확인되지 않은" 스냅샷 정리 + 응답 없는 연결 감지) 호출한다. 인증·세션 규칙은 Hello와 같다.
+  rpc GetResumePoint(ResumePointRequest) returns (ResumePoint);
   // 1초마다 sys / proc(전체 목록) / target 스냅샷 (스냅샷 1건 = 메시지 1개)
   rpc StreamRealtime(stream AgentData) returns (Ack);
-  // 재연결 후 갭 데이터 전송 전용 (Phase 4-4, 스냅샷 1건 = 메시지 1개). 주기적 배치 전송은 없다 (기획노트 §2).
+  // 재연결 후 갭 데이터 전송 전용 (스냅샷 1건 = 메시지 1개, collected_instance_id 필수). 주기적 배치 전송은 없다 (기획노트 §2).
+  // Agent는 묶음마다 스트림을 열고 닫는다 — 서버가 OK로 끝낸 묶음만 받은 것으로 보고 로컬 버퍼에서 지운다.
   rpc StreamBatch(stream AgentData) returns (Ack);
 }
