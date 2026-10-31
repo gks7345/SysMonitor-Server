@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -37,6 +39,11 @@ private:
     struct Session {
         std::string instanceId;
         int activeStreams = 0;
+        // 실시간 채널에서 마지막으로 읽은 스냅샷 timestamp (GetResumePoint의 답). agent_id(자리) 단위라 PC를 교체해도 이어진다.
+        // 메모리에만 있어 서버를 재시작하면 없어진다 — Agent는 "없음"을 받으면 버퍼를 전부 보낸다.
+        // 저장할 때도 이 "마지막으로 읽은 값"을 따로 저장한다 — 저장된 데이터의 최댓값으로 대신하면 Agent 시계가 뒤로 간 뒤의
+        // 틱이 받지 못했는데도 지워진다.
+        std::optional<int64_t> lastRealtimeTimestampUs;
     };
     std::mutex sessionsMtx_;
     std::unordered_map<std::string, Session> sessions_;
@@ -47,8 +54,15 @@ private:
     // 스트림 종료 시 활성 스트림 수를 줄인다. 바인딩된 instance는 남겨 두어 다음 교체 로그에 쓴다.
     void releaseSession(const std::string& agentId);
 
+    // 실시간 채널에서 읽은 스냅샷의 timestamp를 세션에 기록한다 (마지막으로 읽은 값 — 크기 비교는 하지 않는다).
+    void recordRealtimeTimestamp(const std::string& agentId, int64_t timestampUs);
+
     // 스트림 공통 진입 절차: 인증 → instance_id 확인 → 세션 claim. 성공하면 호출부가 반드시 releaseSession()해야 한다.
     grpc::Status beginStream(grpc::ServerContext* context, std::string* verifiedAgentId);
+
+    // unary RPC 확인: 인증 → instance_id 확인 → 세션 판정(claim하지 않음). GetResumePoint가 쓴다
+    // (Hello는 인증과 instance 확인 사이에 프로토콜 버전을 먼저 대조하므로 같은 단계를 직접 밟는다).
+    grpc::Status checkUnary(grpc::ServerContext* context, std::string* verifiedAgentId);
 
 public:
     explicit GrpcServer(AgentAuth auth);
@@ -58,6 +72,10 @@ public:
     // 스트림 인증을 대체하지 않는다 — Hello를 건너뛰고 스트림을 바로 여는 클라이언트도 있을 수 있으므로
     // StreamRealtime/StreamBatch는 계속 각자 authenticate()를 호출한다.
     grpc::Status Hello(grpc::ServerContext* context, const sysmonitor::HelloRequest* request, sysmonitor::Ack* ack) override;
+
+    // 이 agent_id의 실시간 채널에서 마지막으로 읽은 timestamp를 돌려준다 (없으면 필드를 비운다).
+    // Agent가 연결할 때 갭 전송 범위를 정하고, 연결 중에는 주기적으로 불러 응답 없는 연결을 감지하는 데 쓴다.
+    grpc::Status GetResumePoint(grpc::ServerContext* context, const sysmonitor::ResumePointRequest* request, sysmonitor::ResumePoint* response) override;
 
     grpc::Status StreamRealtime(grpc::ServerContext* context, grpc::ServerReader<sysmonitor::AgentData>* reader, sysmonitor::Ack* ack) override;
     grpc::Status StreamBatch(grpc::ServerContext* context, grpc::ServerReader<sysmonitor::AgentData>* reader, sysmonitor::Ack* ack) override;
